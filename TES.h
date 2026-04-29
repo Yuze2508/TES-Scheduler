@@ -4,15 +4,13 @@
  *        Time and Event Scheduler (TES) - Header file
  * 
  * @details 轻量级协作式任务调度器，支持时间触发和事件触发任务，提供任务间通信功能。
+ *          本版本采用环形绝对 tick 时间轴与交替调度策略，无需每个 tick 遍历任务列表，效率更高。
  *          Lightweight cooperative task scheduler supporting time-triggered and event-triggered tasks,
- *          with inter-task communication.
- *          移植到新 MCU 仅需修改本文件中的硬件相关部分。
- *          Porting to a new MCU only requires modifying the hardware-related sections in this file.
+ *          with inter-task communication. This version uses a circular absolute tick timeline and
+ *          alternating scheduling policy, without traversing task list on every tick.
  * 
- * @note 编译器优化等级建议设置为 1 或 2，避免过度优化导致事件响应异常。
- *       Compiler optimization level is recommended to be set to 1 or 2 to avoid abnormal event response.
- * 
- * @see TES.c
+ * @note 移植到新 MCU 仅需修改本文件中的硬件相关部分。
+ *       Porting to a new MCU only requires modifying the hardware-related sections in this file.
  */
 
 #ifndef __TES_H__
@@ -27,8 +25,8 @@
  * @{
  */
 
-/** 1. 目标 MCU 头文件 */
-/** 1. Target MCU header file */
+/** 1. 目标 MCU 头文件（可根据实际平台删除或替换） */
+/** 1. Target MCU header file (can be removed or replaced according to the actual platform) */
 #include <STC15F2K60S2.H>
 
 /**
@@ -69,23 +67,7 @@ typedef long            int32_t;   ///< 有符号32位整数 (-2147483648-214748
 /** Maximum number of tasks (total of time tasks + event tasks should not exceed this value) */
 #define TASK_MAX (8)
 
-/**
- * @brief 调度策略选择
- * @brief Scheduling policy selection
- * @details 默认为交替策略，可通过修改宏值切换。
- * @details Default is alternate policy, can be changed by modifying the macro value.
- */
-#ifndef SCHEDULER_POLICY
-#define SCHEDULER_POLICY SCHEDULER_POLICY_ALT
-#endif
-
 /** @} */
-
-// ==================== 调度策略宏定义 ====================
-// ==================== Scheduling Policy Macros ====================
-
-#define SCHEDULER_POLICY_BAT     0   ///< 批处理策略：一次性处理完所有就绪任务 / Batch policy: process all ready tasks at once
-#define SCHEDULER_POLICY_ALT     1   ///< 交替策略：每次调度只执行一个事件任务和一个时间任务 / Alternate policy: execute one event task and one time task per schedule
 
 // ==================== 枚举类型定义 ====================
 // ==================== Enumeration Type Definitions ====================
@@ -138,8 +120,19 @@ typedef enum {
  * @details All scheduler functions are called through function pointers in this structure.
  */
 typedef struct {
-    void (*tick)(void);     ///< 滴答计时器更新函数（需在定时器中断中调用） / Tick update function (to be called in timer ISR)
-    void (*scheduler)(void);///< 主调度器函数（在主循环中反复调用） / Main scheduler function (to be called repeatedly in main loop)
+    /**
+     * @brief 滴答计时器更新函数（需在定时器中断中调用）
+     * @brief Tick update function (to be called in timer ISR)
+     * @note 仅递增系统 tick，极轻量。
+     * @note Only increments system tick, very lightweight.
+     */
+    void (*tick)(void);
+
+    /**
+     * @brief 主调度器函数（在主循环中反复调用）
+     * @brief Main scheduler function (to be called repeatedly in main loop)
+     */
+    void (*scheduler)(void);
 
     /**
      * @brief 创建时间触发任务
