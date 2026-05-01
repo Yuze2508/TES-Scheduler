@@ -14,9 +14,8 @@
 - ✅ 16位环形绝对时间轴：正确处理 tick 计数器溢出，长期运行无漂移
 - ✅ 动态任务管理：创建、删除、挂起、恢复、修改周期
 - ✅ 任务间通信：16位数据缓存，支持 `send` / `receive`（自动/只读模式）
-- ✅ 极低资源占用：全静态内存，无动态分配，ROM < 1KB，RAM 仅数十字节
+- ✅ 低资源占用：全静态内存，无动态分配
 - ✅ 可移植性：只需提供基础类型和中断开关宏
-- ✅ 允许任务在运行中删除自身（末尾覆盖法保证安全）
 
 ---
 
@@ -166,9 +165,8 @@ MIT 许可证。可自由用于商业和开源项目。
 - ✅ 16‑bit circular absolute timeline: correctly handles tick overflow, no long‑term drift
 - ✅ Dynamic task management: create, delete, suspend, resume, change period
 - ✅ Inter‑task communication: 16‑bit data cache with `send` / `receive` (auto‑clear / read‑only)
-- ✅ Ultra‑low footprint: fully static memory, no heap, ROM < 1KB, RAM tens of bytes
+- ✅ Low memory usage: Completely statically allocated.
 - ✅ Portable: only requires basic types and interrupt control macros
-- ✅ Safe self‑deletion: a task can delete itself at runtime (tail‑overwrite ensures safety)
 
 ---
 
