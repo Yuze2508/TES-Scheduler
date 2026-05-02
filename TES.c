@@ -45,7 +45,7 @@ SchedulerAPI tes;   ///< 对外提供的 API 结构体 / Externally provided API
  */
 static struct {
     SchedulerAPI Public;        ///< 公共 API 指针集合 / Public API pointer set
-    uint16_t system_tick;       ///< 全局系统 tick，每次调用 tes.tick() 递增 / Global system tick, incremented on each tes.tick()
+    volatile uint16_t system_tick;       ///< 全局系统 tick，每次调用 tes.tick() 递增 / Global system tick, incremented on each tes.tick()
 
     struct {
         /**
