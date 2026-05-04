@@ -1,9 +1,9 @@
-# TES3 调度器 (Time and Event Scheduler) 中文+英文双语文档（Chinese-English bilingual version）
+# TES 调度器 (Time and Event Scheduler) 中文+英文双语文档（Chinese-English bilingual version）
 
 <!-- 以下为中文文档 -->
-# TES3 – 时间与事件调度器
+# TES – 时间与事件调度器
 
-**TES3** 是一款专为资源受限单片机（如 8051、STC、AVR、ARM Cortex‑M0）设计的轻量级协作式调度器。它融合了**时间触发**（周期性任务）与**事件触发**（单次响应任务）两种模型，采用**交替公平调度**策略，并提供简单的任务间通信机制。
+**TES** 是一款专为资源受限单片机（如 8051、STC、AVR、ARM Cortex‑M0）设计的轻量级协作式调度器。它融合了**时间触发**（周期性任务）与**事件触发**（单次响应任务）两种模型，采用**交替公平调度**策略，并提供简单的任务间通信机制。
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 🏗️ 架构概述
 
-TES3 采用**双列表**结构：一个数组存放时间任务（`time_list`），另一个数组存放事件任务（`event_list`）。每个任务控制块（TCB）包含：
+TES 采用**双列表**结构：一个数组存放时间任务（`time_list`），另一个数组存放事件任务（`event_list`）。每个任务控制块（TCB）包含：
 
 - 任务入口函数指针 `entry`
 - 任务状态 `taskflag`（`NOT_RUN` / `RUN` / `SUSPEND` / `READY`）
@@ -65,7 +65,7 @@ TES3 采用**双列表**结构：一个数组存放时间任务（`time_list`）
 
 ### 1. 移植配置
 
-在你的工程中包含 `TES3.h` 和 `TES3.c`，并根据目标平台修改：
+在你的工程中包含 `TES.h` 和 `TES.c`，并根据目标平台修改：
 
 - **基础类型**：确保 `uint8_t`、`uint16_t` 等定义正确（可包含 `<stdint.h>` 或自定义）。
 - **中断开关宏**：
@@ -125,7 +125,7 @@ tes.send(event_proc, 0x1234);
 
 ## 🔧 移植指南
 
-TES3 的移植只需满足以下依赖：
+TES 的移植只需满足以下依赖：
 
 | 依赖项 | 说明 |
 |--------|------|
@@ -136,8 +136,8 @@ TES3 的移植只需满足以下依赖：
 
 **步骤：**
 
-1. 将 `TES3.h` 和 `TES3.c` 添加到工程。
-2. 在 `TES3.h` 中修改类型定义（可改为 `#include <stdint.h>`）。
+1. 将 `TES.h` 和 `TES.c` 添加到工程。
+2. 在 `TES.h` 中修改类型定义（可改为 `#include <stdint.h>`）。
 3. 根据编译器修改中断开关宏（例如 ARM 使用 `__disable_irq()` / `__enable_irq()`）。
 4. 若不需要特定 MCU 头文件，删除 `#include <STC15F2K60S2.H>`。
 5. 配置定时器中断，调用 `tes.tick()`。
@@ -152,9 +152,9 @@ MIT 许可证。可自由用于商业和开源项目。
 ---
 
 <!-- 以下为英文文档 -->
-# TES3 – Time and Event Scheduler
+# TES – Time and Event Scheduler
 
-**TES3** is a lightweight cooperative scheduler designed for resource‑constrained microcontrollers (e.g., 8051, STC, AVR, ARM Cortex‑M0). It combines **time‑triggered** (periodic) and **event‑driven** (one‑shot) task models, uses an **alternating fair scheduling** policy, and provides simple inter‑task communication.
+**TES** is a lightweight cooperative scheduler designed for resource‑constrained microcontrollers (e.g., 8051, STC, AVR, ARM Cortex‑M0). It combines **time‑triggered** (periodic) and **event‑driven** (one‑shot) task models, uses an **alternating fair scheduling** policy, and provides simple inter‑task communication.
 
 ---
 
@@ -172,7 +172,7 @@ MIT 许可证。可自由用于商业和开源项目。
 
 ## 🏗️ Architecture Overview
 
-TES3 maintains two separate arrays: one for time tasks (`time_list`) and one for event tasks (`event_list`). Each Task Control Block (TCB) contains:
+TES maintains two separate arrays: one for time tasks (`time_list`) and one for event tasks (`event_list`). Each Task Control Block (TCB) contains:
 
 - Task function pointer `entry`
 - Task state `taskflag` (`NOT_RUN` / `RUN` / `SUSPEND` / `READY`)
@@ -216,7 +216,7 @@ See the “Quick Start” section for usage examples.
 
 ### 1. Porting configuration
 
-Include `TES3.h` and `TES3.c` in your project, then adjust for your target:
+Include `TES.h` and `TES.c` in your project, then adjust for your target:
 
 - **Basic types**: ensure `uint8_t`, `uint16_t` etc. are defined (you can include `<stdint.h>`).
 - **Interrupt control macros**:
@@ -276,7 +276,7 @@ tes.send(event_proc, 0x1234);
 
 ## 🔧 Porting Guide
 
-TES3 depends only on the following:
+TES depends only on the following:
 
 | Dependency | Description |
 |------------|-------------|
@@ -287,8 +287,8 @@ TES3 depends only on the following:
 
 **Steps:**
 
-1. Add `TES3.h` and `TES3.c` to your project.
-2. Modify type definitions in `TES3.h` (or simply `#include <stdint.h>`).
+1. Add `TES.h` and `TES.c` to your project.
+2. Modify type definitions in `TES.h` (or simply `#include <stdint.h>`).
 3. Adapt interrupt control macros for your compiler (e.g., ARM: `__disable_irq()` / `__enable_irq()`).
 4. Remove `#include <STC15F2K60S2.H>` if not used.
 5. Setup a timer interrupt, call `tes.tick()` inside it.
