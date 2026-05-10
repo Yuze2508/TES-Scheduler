@@ -235,7 +235,7 @@ static void Scheduler(void) {
  */
 static FCstate Create_time(void (*entry)(void), uint16_t time) {
     uint16_t now;
-    uint8_t idx;
+    int8_t idx;
 
     if (time == 0) return OPS_NO;
     if (SearchIndex(entry, TIME) >= 0) return OPS_NO;
@@ -262,7 +262,7 @@ static FCstate Create_time(void (*entry)(void), uint16_t time) {
  * @return 操作结果 / Operation result
  */
 static FCstate Create_event(void (*entry)(void)) {
-    uint8_t idx;
+    int8_t idx;
 
     if (entry == 0) return OPS_NO;
     if (SearchIndex(entry, EVENT) >= 0) return OPS_NO;
@@ -402,7 +402,7 @@ static FCstate TaskRecover(void (*entry)(void)) {
  * @return 操作结果（任务状态不为 NOT_RUN 时会失败） / Operation result (fails if task state is not NOT_RUN)
  */
 static FCstate TaskRelease(void (*entry)(void)) {
-    uint8_t index;
+    int8_t index;
 
     if (entry == 0) return OPS_NO;
 
@@ -426,7 +426,7 @@ static FCstate TaskRelease(void (*entry)(void)) {
  * @return 操作结果 / Operation result
  */
 static FCstate Senddat(void (*entry)(void), uint16_t d) {
-    uint8_t index;
+    int8_t index;
 
     if (entry == 0) return OPS_NO;
     if (d == 0xFFFF) return OPS_NO;
@@ -486,7 +486,7 @@ static uint16_t Receive(void (*entry)(void), ReceiveMode mode) {
  * @return 操作结果 / Operation result
  */
 static FCstate Clear(void (*entry)(void)) {
-    uint8_t index;
+    int8_t index;
 
     if (entry == 0) return OPS_NO;
 
