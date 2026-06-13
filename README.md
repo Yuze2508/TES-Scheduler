@@ -1,6 +1,5 @@
 # TES 调度器 (Time and Event Scheduler) 中文+英文双语文档（Chinese-English bilingual version）
 
-<!-- 以下为中文文档 -->
 # TES – 时间与事件调度器
 
 **TES** 是一款专为资源受限单片机（如 8051、STC、AVR、ARM Cortex‑M0）设计的轻量级协作式调度器。它融合了**时间触发**（周期性任务）与**事件触发**（单次响应任务）两种模型，采用**交替公平调度**策略，并提供简单的任务间通信机制。
@@ -9,11 +8,11 @@
 
 ## 📌 特性
 
-- ✅ 双任务模型：`TIME`（周期执行）与 `EVENT`（触发执行）
-- ✅ 交替调度：每次调度执行一个事件任务 + 一个时间任务，确保两类任务都能及时响应
+- ✅ 双任务模型：`TIME`（周期执行）与 `EVENT`（触发执行，无需预先创建）
+- ✅ 交替调度：每次调度执行一个事件 + 一个时间任务，确保两类任务都能及时响应
 - ✅ 16位环形绝对时间轴：正确处理 tick 计数器溢出，长期运行无漂移
-- ✅ 动态任务管理：创建、删除、挂起、恢复、修改周期
-- ✅ 任务间通信：16位数据缓存，支持 `send` / `receive`（自动/只读模式）
+- ✅ 动态任务管理：创建、删除、挂起、恢复、修改时间任务周期
+- ✅ 任务间通信：16位数据缓存（仅时间任务），支持 `send` / `receive`（自动/只读模式）
 - ✅ 低资源占用：全静态内存，无动态分配
 - ✅ 可移植性：只需提供基础类型和中断开关宏
 
@@ -21,18 +20,15 @@
 
 ## 🏗️ 架构概述
 
-TES 采用**双列表**结构：一个数组存放时间任务（`time_list`），另一个数组存放事件任务（`event_list`）。每个任务控制块（TCB）包含：
+TES 分别管理**时间任务**和**事件**：
 
-- 任务入口函数指针 `entry`
-- 任务状态 `taskflag`（`NOT_RUN` / `RUN` / `SUSPEND` / `READY`）
-- 周期（仅时间任务）`taskcyc`
-- 下次执行的绝对 tick（仅时间任务）`next_tick`
-- 16位数据缓存 `cache`
+- **时间任务**：静态数组 `time_list` 存储任务控制块（TCB），包含入口函数、周期、下次绝对 tick、状态和缓存。
+- **事件**：使用一个固定大小的函数指针数组 `event_list`，支持事件计数（可连续发布多个事件）。
 
 调度核心 `sch_alt()` 在两个阶段之间交替：
 
-1. **事件阶段**：按轮询顺序寻找第一个 `READY` 状态的事件任务，执行后将其恢复为 `NOT_RUN`。
-2. **时间阶段**：按轮询顺序寻找第一个已到期（`now >= next_tick`）且未挂起的时间任务，执行后重新计算 `next_tick = now + taskcyc`。
+1. **事件阶段**：如果事件列表非空，取出第一个函数指针并执行（采用尾部覆盖更新函数指针数组），然后切换到时间阶段。
+2. **时间阶段**：按轮询顺序寻找第一个已到期（`now >= next_tick`）且未挂起的时间任务，执行后重新计算 `next_tick = now + taskcyc`，然后切换回事件阶段。
 
 系统 tick 由硬件定时器中断驱动，仅递增全局 `system_tick`。调度器在主循环中反复调用 `tes.scheduler()`。
 
@@ -47,15 +43,14 @@ TES 采用**双列表**结构：一个数组存放时间任务（`time_list`）�
 | `tes.tick()` | 滴答中断服务函数，每次中断调用一次，递增系统 tick。 |
 | `tes.scheduler()` | 主调度器，需在主循环中无限调用。 |
 | `tes.create_time(entry, cycle)` | 创建时间任务，首次执行延迟一个周期。 |
-| `tes.create_event(entry)` | 创建事件任务，初始为 `NOT_RUN`。 |
-| `tes.del(entry)` | 删除任务（支持自删除）。 |
+| `tes.del(entry)` | 删除时间任务（支持自删除）。 |
 | `tes.cycle(entry, new_cycle)` | 修改时间任务的周期（下次执行生效）。 |
-| `tes.suspend(entry)` | 挂起任务。 |
-| `tes.recovery(entry)` | 恢复挂起的任务（时间任务重新开始计时）。 |
-| `tes.release(entry)` | 发布事件（将事件任务状态设为 `READY`）。 |
-| `tes.send(entry, data)` | 向指定任务发送 16 位数据（0xFFFF 为保留值）。 |
-| `tes.receive(entry, mode)` | 接收本任务的数据（`READ_ONLY` 或 `AUTO_CLEAR`）。 |
-| `tes.clear(entry)` | 清空任务的数据缓存（设为 0xFFFF）。 |
+| `tes.suspend(entry)` | 挂起时间任务。 |
+| `tes.recovery(entry)` | 恢复被挂起的时间任务（重新从当前 tick + 周期开始计时）。 |
+| `tes.release(entry)` | 发布事件：将函数指针 `entry` 放入事件列表，由调度器执行。 |
+| `tes.send(entry, data)` | 向指定时间任务发送 16 位数据（0xFFFF 为保留值）。 |
+| `tes.receive(entry, mode)` | 接收本时间任务的数据（`READ_ONLY` 或 `AUTO_CLEAR`）。 |
+| `tes.clear(entry)` | 清空时间任务的数据缓存（设为 0xFFFF）。 |
 
 详细用法请参考“快速入门”示例。
 
@@ -73,7 +68,7 @@ TES 采用**双列表**结构：一个数组存放时间任务（`time_list`）�
   #define TIMER_INTERRUPT_ENABLE()   do { EA = 1; } while(0)
   #define TIMER_INTERRUPT_DISABLE()  do { EA = 0; } while(0)
   ```
-- **头文件**：若无需特定 MCU 头文件，可移除 `#include <STC15F2K60S2.H>`。
+- **头文件**：代码中是 `#include <STC15F2K60S2.H>`，按需更改为对应MCU的头文件即可。
 
 ### 2. 硬件定时器配置
 
@@ -87,17 +82,20 @@ void Timer0_ISR(void) interrupt 1 {
 
 ### 3. 编写任务函数
 
-所有任务必须为 `void func(void)` 类型，且**不能阻塞**（无延时循环、无等待标志）。
+**时间任务**：周期执行，不可阻塞。
 
 ```c
 void task_100ms(void) {
     static uint8_t cnt = 0;
     cnt++;
 }
+```
 
-void event_proc(void) {
-    uint16_t data = tes.receive(event_proc, AUTO_CLEAR);
-    // 处理数据 ...
+**事件响应函数**：由 `tes.release()` 触发，同样不可阻塞。
+
+```c
+void event_handler(void) {
+    // 按键处理、数据通知等
 }
 ```
 
@@ -107,7 +105,7 @@ void event_proc(void) {
 void main(void) {
     TES_Init();
     tes.create_time(task_100ms, 100);
-    tes.create_event(event_proc);
+    // 不需要预先创建事件任务，直接发布即可
     while (1) {
         tes.scheduler();
     }
@@ -117,9 +115,11 @@ void main(void) {
 ### 5. 触发事件与发送数据
 
 ```c
-tes.release(event_proc);
-tes.send(event_proc, 0x1234);
+tes.release(event_handler);        // 发布事件，稍后执行
+tes.send(task_100ms, 0x1234);      // 向时间任务发送数据
 ```
+#### **事件触发机制说明**
+相较于上一版本，此版本无需创建事件任务，事件任务函数直接使用`tes.release()`语句来触发执行。
 
 ---
 
@@ -139,7 +139,7 @@ TES 的移植只需满足以下依赖：
 1. 将 `TES.h` 和 `TES.c` 添加到工程。
 2. 在 `TES.h` 中修改类型定义（可改为 `#include <stdint.h>`）。
 3. 根据编译器修改中断开关宏（例如 ARM 使用 `__disable_irq()` / `__enable_irq()`）。
-4. 若不需要特定 MCU 头文件，删除 `#include <STC15F2K60S2.H>`。
+4. 更改 MCU 头文件 `#include <STC15F2K60S2.H>`为对应的头文件。
 5. 配置定时器中断，调用 `tes.tick()`。
 6. 主循环中调用 `tes.scheduler()`。
 
@@ -151,7 +151,7 @@ MIT 许可证。可自由用于商业和开源项目。
 
 ---
 
-<!-- 以下为英文文档 -->
+
 # TES – Time and Event Scheduler
 
 **TES** is a lightweight cooperative scheduler designed for resource‑constrained microcontrollers (e.g., 8051, STC, AVR, ARM Cortex‑M0). It combines **time‑triggered** (periodic) and **event‑driven** (one‑shot) task models, uses an **alternating fair scheduling** policy, and provides simple inter‑task communication.
@@ -160,11 +160,11 @@ MIT 许可证。可自由用于商业和开源项目。
 
 ## ✨ Features
 
-- ✅ Dual task models: `TIME` (periodic) and `EVENT` (triggered)
-- ✅ Alternating scheduling: one event task + one time task per round – fair to both types
+- ✅ Dual task models: `TIME` (periodic) and `EVENT` (triggered, no pre‑creation required)
+- ✅ Alternating scheduling: one event + one time task per round – fair to both types
 - ✅ 16‑bit circular absolute timeline: correctly handles tick overflow, no long‑term drift
-- ✅ Dynamic task management: create, delete, suspend, resume, change period
-- ✅ Inter‑task communication: 16‑bit data cache with `send` / `receive` (auto‑clear / read‑only)
+- ✅ Dynamic task management: create, delete, suspend, resume, change period for time tasks
+- ✅ Inter‑task communication: 16‑bit data cache (time tasks only) with `send` / `receive` (auto‑clear / read‑only)
 - ✅ Low memory usage: Completely statically allocated.
 - ✅ Portable: only requires basic types and interrupt control macros
 
@@ -172,18 +172,15 @@ MIT 许可证。可自由用于商业和开源项目。
 
 ## 🏗️ Architecture Overview
 
-TES maintains two separate arrays: one for time tasks (`time_list`) and one for event tasks (`event_list`). Each Task Control Block (TCB) contains:
+TES manages **time tasks** and **events** separately:
 
-- Task function pointer `entry`
-- Task state `taskflag` (`NOT_RUN` / `RUN` / `SUSPEND` / `READY`)
-- Period (only for time tasks) `taskcyc`
-- Absolute tick of next execution (only for time tasks) `next_tick`
-- 16‑bit data cache `cache`
+- **Time tasks**: static array `time_list` stores TCBs (entry, period, absolute next tick, state, cache).
+- **Events**: fixed‑size function pointer array `event_list` supports event counting (multiple publishes are queued, no loss).
 
 The core scheduler `sch_alt()` alternates between two phases:
 
-1. **Event phase**: scans for the first `READY` event task, executes it, then sets it back to `NOT_RUN`.
-2. **Time phase**: scans for the first time task that is not suspended and whose `next_tick` has been reached (`now >= next_tick`), executes it, then recalculates `next_tick = now + taskcyc`.
+1. **Event phase**: if the event list is not empty, take the first function pointer, execute it (tail‑overwrite, FIFO order), then switch to time phase.
+2. **Time phase**: round‑robin scan for the first non‑suspended time task whose `next_tick` has been reached (`now >= next_tick`), execute it, recalculate `next_tick = now + taskcyc`, then switch back to event phase.
 
 The system tick is driven by a hardware timer interrupt, which simply increments the global `system_tick`. The scheduler must be called repeatedly from the main loop (`tes.scheduler()`).
 
@@ -198,15 +195,14 @@ All functions are accessed via the global structure `tes`.
 | `tes.tick()` | Tick ISR – increments system tick, call from timer interrupt. |
 | `tes.scheduler()` | Main scheduler – call indefinitely from main loop. |
 | `tes.create_time(entry, cycle)` | Create a time task; first execution delayed by one period. |
-| `tes.create_event(entry)` | Create an event task; initial state is `NOT_RUN`. |
-| `tes.del(entry)` | Delete a task (supports self‑deletion). |
+| `tes.del(entry)` | Delete a time task (supports self‑deletion). |
 | `tes.cycle(entry, new_cycle)` | Change period of a time task (effective next execution). |
-| `tes.suspend(entry)` | Suspend a task. |
-| `tes.recovery(entry)` | Resume a suspended task; time tasks restart counting. |
-| `tes.release(entry)` | Post an event – sets event task to `READY`. |
-| `tes.send(entry, data)` | Send 16‑bit data to a task (0xFFFF is reserved). |
-| `tes.receive(entry, mode)` | Receive data for the calling task (`READ_ONLY` or `AUTO_CLEAR`). |
-| `tes.clear(entry)` | Clear the task's data cache (set to 0xFFFF). |
+| `tes.suspend(entry)` | Suspend a time task. |
+| `tes.recovery(entry)` | Resume a suspended time task (restart counting from current tick + period). |
+| `tes.release(entry)` | Publish an event: put the function pointer `entry` into the event list, and it will be executed by the scheduler. |
+| `tes.send(entry, data)` | Send 16‑bit data to a time task (0xFFFF is reserved). |
+| `tes.receive(entry, mode)` | Receive data for the calling time task (`READ_ONLY` or `AUTO_CLEAR`). |
+| `tes.clear(entry)` | Clear the time task's data cache (set to 0xFFFF). |
 
 See the “Quick Start” section for usage examples.
 
@@ -238,17 +234,20 @@ void Timer0_ISR(void) interrupt 1 {
 
 ### 3. Write task functions
 
-All tasks must be of type `void func(void)` and **must not block** (no busy‑wait loops).
+**Time task** (periodic, must not block):
 
 ```c
 void task_100ms(void) {
     static uint8_t cnt = 0;
     cnt++;
 }
+```
 
-void event_proc(void) {
-    uint16_t data = tes.receive(event_proc, AUTO_CLEAR);
-    // process data ...
+**Event handler** (triggered by `tes.release`, also non‑blocking):
+
+```c
+void event_handler(void) {
+    // button handling, data notification, etc.
 }
 ```
 
@@ -258,7 +257,7 @@ void event_proc(void) {
 void main(void) {
     TES_Init();
     tes.create_time(task_100ms, 100);
-    tes.create_event(event_proc);
+    // No need to pre‑create event tasks; just call tes.release() later.
     while (1) {
         tes.scheduler();
     }
@@ -268,9 +267,12 @@ void main(void) {
 ### 5. Trigger events and send data
 
 ```c
-tes.release(event_proc);
-tes.send(event_proc, 0x1234);
+tes.release(event_handler);        // publish an event, will be executed soon
+tes.send(task_100ms, 0x1234);      // send data to a time task
 ```
+
+#### Event Trigger Mechanism Description
+Compared to the previous version, this version does not require creating event tasks. Event task functions are directly triggered for execution using the `tes.release()` statement.
 
 ---
 
@@ -290,7 +292,7 @@ TES depends only on the following:
 1. Add `TES.h` and `TES.c` to your project.
 2. Modify type definitions in `TES.h` (or simply `#include <stdint.h>`).
 3. Adapt interrupt control macros for your compiler (e.g., ARM: `__disable_irq()` / `__enable_irq()`).
-4. Remove `#include <STC15F2K60S2.H>` if not used.
+4. Change the MCU header file `#include <STC15F2K60S2.H>` to the corresponding header file.
 5. Setup a timer interrupt, call `tes.tick()` inside it.
 6. Call `tes.scheduler()` in your main loop.
 

@@ -12,6 +12,7 @@
  *          - SysTick 仅递增全局计数器，不再遍历任务列表
  *          - 调度器在任务执行后读取当前 tick 并计算下次执行时刻，消除累积误差
  *          - 仅保留交替调度策略（每次调度执行一个事件任务 + 一个时间任务）
+ *          - 重构事件响应机制，使用函数指针列表 + 尾部覆盖，支持事件计数
  *          
  *          Implements a lightweight cooperative task scheduler, including management of time-triggered
  *          and event-triggered tasks, alternating scheduling policy, circular absolute timeline,
@@ -23,19 +24,20 @@
  *          - SysTick only increments global counter, no task list traversal
  *          - Scheduler reads current tick after task execution and calculates next time, eliminating drift
  *          - Only alternating scheduling policy (one event task + one time task per schedule)
+ *          - Refactored event response mechanism using function pointer list with tail overwrite, supports event counting
  * 
  * @see TES.h
  */
 
 #include "TES.h"
 
-// ==================== 全局 API 实例 ====================
-// ==================== Global API Instance ====================
+/* ==================== 全局API实例 ==================== */
+/* ==================== Global API Instance ==================== */
 
-SchedulerAPI tes;   ///< 对外提供的 API 结构体 / Externally provided API structure
+SchedulerAPI tes;   /* 用户通过此结构体调用所有功能 / User calls all functions through this structure */
 
-// ==================== 私有数据存储 ====================
-// ==================== Private Data Storage ====================
+/* ==================== 私有数据 ==================== */
+/* ==================== Private Data ==================== */
 
 /**
  * @brief 调度器内部数据结构
@@ -44,41 +46,31 @@ SchedulerAPI tes;   ///< 对外提供的 API 结构体 / Externally provided API
  * @details Contains public API pointers and private task control blocks.
  */
 static struct {
-    SchedulerAPI Public;        ///< 公共 API 指针集合 / Public API pointer set
-    volatile uint16_t system_tick;       ///< 全局系统 tick，每次调用 tes.tick() 递增 / Global system tick, incremented on each tes.tick()
+    SchedulerAPI Public;        /* 内部API集合，初始化后赋值给全局tes / Internal API set, assigned to global tes after init */
+    volatile uint16_t system_tick;       /* 全局系统tick，每次调用tes.tick()递增 / Global system tick, incremented on each tes.tick() */
 
     struct {
-        /**
-         * @brief 时间任务控制块数组
-         * @brief Time task control block array
-         */
+        /* 时间任务控制块 / Time task control block */
         struct {
-            void (*entry)(void);    ///< 任务函数指针 / Task function pointer
-            uint16_t taskcyc;       ///< 周期（单位：tick） / Period (unit: tick)
-            uint16_t next_tick;     ///< 下次执行的绝对 tick 时刻（环形时间轴） / Absolute tick of next execution (circular timeline)
-            TaskState taskflag;     ///< 任务状态 / Task state
-            uint16_t cache;         ///< 数据缓存区（通信） / Data cache (communication)
+            void (*entry)(void);    /* 任务函数入口 / Task function entry */
+            uint16_t taskcyc;       /* 任务周期（单位：tick） / Task period (unit: tick) */
+            uint16_t next_tick;     /* 下次执行的绝对tick时刻（环形时间轴） / Absolute tick of next execution (circular timeline) */
+            TaskState taskflag;     /* 任务状态 / Task state */
+            uint16_t cache;         /* 数据缓存区（任务间通信） / Data cache (inter-task communication) */
         } time_list[TASK_MAX];
 
-        /**
-         * @brief 事件任务控制块数组
-         * @brief Event task control block array
-         */
-        struct {
-            void (*entry)(void);    ///< 任务函数指针 / Task function pointer
-            TaskState taskflag;     ///< 任务状态（增加 READY 态） / Task state (adds READY state)
-            uint16_t cache;         ///< 数据缓存区 / Data cache
-        } event_list[TASK_MAX];
+        /* 事件任务待执行列表 / Pending event task list */
+        void (*event_list[TASK_MAX])(void);
 
-        uint8_t time_num;           ///< 当前已创建的时间任务数量 / Number of currently created time tasks
-        uint8_t event_num;          ///< 当前已创建的事件任务数量 / Number of currently created event tasks
+        uint8_t time_num;           /* 当前时间任务数量 / Number of currently created time tasks */
+        uint8_t event_num;          /* 当前已装载事件数量 / Number of pending events */
 
-    } pri;  ///< 私有部分 / Private part
+    } pri;
 
-} dat;
+} dat;  /* 内部数据实例，模块私有 / Internal data instance, private to module */
 
-// ==================== 环形时间比较宏 ====================
-// ==================== Circular Time Comparison Macro ====================
+/* ==================== 环形时间比较宏 ==================== */
+/* ==================== Circular Time Comparison Macro ==================== */
 
 /**
  * @brief 环形时间比较宏，正确处理 16 位无符号溢出
@@ -91,40 +83,36 @@ static struct {
  */
 #define TICK_TIMEOUT(now, next)  ((int16_t)((now) - (next)) >= 0)
 
-// ==================== 私有函数实现 ====================
-// ==================== Private Function Implementations ====================
+/* ==================== 私有函数实现 ==================== */
+/* ==================== Private Function Implementations ==================== */
 
 /**
  * @brief 查找任务在对应列表中的索引
- * @brief Find the index of a task in the corresponding list
+ * @brief Find the index of a task in the list
  * @param entry 任务函数指针 / Task function pointer
- * @param type  任务类型（TIME 或 EVENT） / Task type (TIME or EVENT)
- * @return 索引值（>=0）表示成功，-1 表示未找到或参数无效 / Index (>=0) on success, -1 if not found or invalid parameter
+ * @return 索引（>=0）或 -1（未找到/参数错误） / Index (>=0) on success, -1 if not found or invalid parameter
  */
-static int8_t SearchIndex(void (*entry)(void), TaskType type) {
+static int8_t SearchIndex(void (*entry)(void))
+{
     uint8_t i;
 
     if (entry == 0) return -1;
 
-    if (type == TIME) {
-        for (i = 0; i < dat.pri.time_num; i++) {
-            if (dat.pri.time_list[i].entry == entry) return i;
-        }
-    } else { // EVENT
-        for (i = 0; i < dat.pri.event_num; i++) {
-            if (dat.pri.event_list[i].entry == entry) return i;
-        }
+    for (i = 0; i < dat.pri.time_num; i++) {
+        if (dat.pri.time_list[i].entry == entry) return i;
     }
+
     return -1;
 }
 
 /**
  * @brief 滴答定时器中断服务函数（需挂载到硬件定时器中断）
  * @brief Tick timer interrupt service function (to be attached to hardware timer interrupt)
- * @note  只递增全局 system_tick，极轻量。
- * @note  Only increments global system_tick, very lightweight.
+ * @note  只递增全局system_tick
+ * @note  Only increments global system_tick
  */
-static void SysTick(void) {
+static void SysTick(void)
+{
     dat.system_tick++;
 }
 
@@ -133,40 +121,54 @@ static void SysTick(void) {
  * @brief Alternate scheduling policy core
  * @details 每次调度执行一个事件任务和一个时间任务，循环交替。
  *          静态索引实现轮询，带有边界安全检查，防止数组越界。
- *          对 16 位 system_tick 的读取进行临界区保护，防止 8 位机撕裂。
+ *          对16位system_tick的读取进行临界区保护，防止8位机撕裂。
  * @details Executes one event task and one time task per schedule, alternating.
- *          Static indices implement round-robin with boundary checks to prevent array overflow.
+ *          Static index implements round-robin with boundary checks to prevent array overflow.
  *          Critical section protection for reading 16-bit system_tick to prevent tearing on 8-bit MCUs.
  */
-static void sch_alt(void) {
-    static uint8_t event_i = 0, time_i = 0;
+static void sch_alt(void)
+{
+    static uint8_t time_i = 0;
     static uint8_t alt_phase = 0;   /* 0: 先事件后时间 / event first then time, 1: 先时间后事件 / time first then event */
     uint8_t i;
     uint8_t idx;
-    uint16_t now;   /* 存放安全的系统 tick 快照 / Safe system tick snapshot */
+    uint16_t now;   /* 存放安全的系统tick快照 / Safe system tick snapshot */
 
-    /* ----- 阶段0：执行一个就绪的事件任务 / Phase 0: execute one ready event task ----- */
+    /* ----- 阶段0：处理一个事件 / Phase 0: handle one event ----- */
     if (alt_phase == 0) {
-        if (event_i >= dat.pri.event_num) event_i = 0;
-
-        for (i = 0; i < dat.pri.event_num; i++) {
-            idx = event_i++;
-            if (event_i >= dat.pri.event_num) event_i = 0;
-
-            if (dat.pri.event_list[idx].taskflag == SUSPEND) continue;
-            if (dat.pri.event_list[idx].taskflag != READY) continue;
-
-            /* 执行事件任务 / Execute event task */
-            dat.pri.event_list[idx].taskflag = RUN;
-            dat.pri.event_list[idx].entry();
-            if (dat.pri.event_list[idx].taskflag == RUN) {
-                dat.pri.event_list[idx].taskflag = NOT_RUN;
-            }
-
-            alt_phase = 1;  /* 下一轮执行时间任务 / Next round execute time task */
-            break;
+        
+        // 1. 先检查是否有事件需要处理，没有则直接更新相位
+        // 1. Check if there are pending events; if not, just update phase
+        TIMER_INTERRUPT_DISABLE();
+        if(dat.pri.event_num == 0){
+            TIMER_INTERRUPT_ENABLE();
+            alt_phase = 1;
+            
+        }else{
+        
+            // 2. 有事件处理，取出待处理事件函数指针数组的第一个元素
+            // 2. There is an event to process: take the first element of the pending event function pointer array
+            void (*func)(void) = dat.pri.event_list[0];
+            
+            // 3. 计数更新
+            // 3. Decrement event count
+            dat.pri.event_num--;
+            
+            // 4. 检查计数是否为0，为0则直接清零，不为0则尾部覆盖更新函数指针数组
+            // 4. If count is zero, clear the first element; otherwise, overwrite the first element with the last element (tail overwrite)
+            if(dat.pri.event_num == 0){dat.pri.event_list[0] = 0;}
+            else{dat.pri.event_list[0] = dat.pri.event_list[dat.pri.event_num];}
+            
+            TIMER_INTERRUPT_ENABLE();
+            
+            // 5. 执行任务函数
+            // 5. Execute the task function
+            func();
+            
+            // 6. 更新相位
+            // 6. Update phase
+            alt_phase = 1;
         }
-        if (i >= dat.pri.event_num) alt_phase = 1;   /* 无事件任务就绪 / No event task ready */
     }
 
     /* ----- 阶段1：执行一个到点的时间任务 / Phase 1: execute one due time task ----- */
@@ -179,7 +181,7 @@ static void sch_alt(void) {
 
             if (dat.pri.time_list[idx].taskflag == SUSPEND) continue;
 
-            /* 原子读取系统 tick（防止 8 位机撕裂） / Atomic read of system tick (prevents tearing on 8-bit MCUs) */
+            /* 原子读取系统tick（防止8位机撕裂） / Atomic read of system tick (prevents tearing on 8-bit MCUs) */
             TIMER_INTERRUPT_DISABLE();
             now = dat.system_tick;
             TIMER_INTERRUPT_ENABLE();
@@ -191,16 +193,14 @@ static void sch_alt(void) {
             dat.pri.time_list[idx].taskflag = RUN;
             dat.pri.time_list[idx].entry();
 
-            /**
-             * @brief 防御性处理：若任务内部执行了删除/挂起自身，则 taskflag 不再是 RUN，
-             *        此时不应再修改 next_tick，避免污染被尾部覆盖的新任务。
-             * @brief Defensive handling: if the task deletes/suspends itself inside, taskflag is no longer RUN,
-             *        then next_tick should not be modified to avoid polluting the new task overwritten at the tail.
-             */
+            /* 防御性处理：若任务内部执行了删除/挂起自身，则taskflag不再是RUN，
+               此时不应再修改next_tick，避免污染被尾部覆盖的新任务 */
+            /* Defensive handling: if the task deletes/suspends itself inside, taskflag is no longer RUN,
+               then next_tick should not be modified to avoid polluting the new task overwritten at the tail */
             if (dat.pri.time_list[idx].taskflag == RUN) {
                 dat.pri.time_list[idx].taskflag = NOT_RUN;
 
-                /* 重新获取当前系统 tick 并设置下次执行时刻 / Re-read current system tick and set next execution time */
+                /* 重新获取当前系统tick并设置下次执行时刻 / Re-read current system tick and set next execution time */
                 TIMER_INTERRUPT_DISABLE();
                 now = dat.system_tick;
                 TIMER_INTERRUPT_ENABLE();
@@ -210,35 +210,36 @@ static void sch_alt(void) {
             alt_phase = 0;  /* 下一轮执行事件任务 / Next round execute event task */
             break;
         }
-        if (i >= dat.pri.time_num) alt_phase = 0;   /* 无时间任务到点 / No time task due */
+        if (i >= dat.pri.time_num) alt_phase = 0;
     }
 }
 
 /**
- * @brief 调度器入口函数
- * @brief Scheduler entry function
+ * @brief 调度器主入口（由用户主循环调用）
+ * @brief Scheduler entry function (to be called from main loop)
  */
-static void Scheduler(void) {
+static void Scheduler(void)
+{
     sch_alt();
 }
 
-// ==================== API 实现 ====================
-// ==================== API Implementations ====================
+/* ==================== API 实现 ==================== */
+/* ==================== API Implementations ==================== */
 
 /**
  * @brief 创建时间触发任务
  * @brief Create a time-triggered task
  * @param entry 任务函数指针 / Task function pointer
- * @param time  执行周期（tick 数，不能为 0） / Execution period (number of ticks, cannot be 0)
- * @return 操作结果 / Operation result
- * @note 第一次执行将延迟一个周期。 / The first execution will be delayed by one period.
+ * @param time  执行周期（tick数，必须 >0） / Execution period (number of ticks, must be >0)
+ * @return OPS_OK / OPS_NO
  */
-static FCstate Create_time(void (*entry)(void), uint16_t time) {
+static FCstate Create_time(void (*entry)(void), uint16_t time)
+{
     uint16_t now;
-    int8_t idx;
+    uint8_t idx;
 
     if (time == 0) return OPS_NO;
-    if (SearchIndex(entry, TIME) >= 0) return OPS_NO;
+    if (SearchIndex(entry) >= 0) return OPS_NO;
     if (dat.pri.time_num >= TASK_MAX) return OPS_NO;
     if (entry == 0) return OPS_NO;
 
@@ -247,7 +248,7 @@ static FCstate Create_time(void (*entry)(void), uint16_t time) {
     idx = dat.pri.time_num;
     dat.pri.time_list[idx].entry     = entry;
     dat.pri.time_list[idx].taskcyc   = time;
-    dat.pri.time_list[idx].next_tick = now + time;   /* 第一次执行延迟一个周期 / First execution delayed by one period */
+    dat.pri.time_list[idx].next_tick = now + time;  /* 第一次执行延迟一个周期 / First execution delayed by one period */
     dat.pri.time_list[idx].taskflag  = NOT_RUN;
     dat.pri.time_list[idx].cache     = 0xFFFF;
     dat.pri.time_num++;
@@ -256,55 +257,21 @@ static FCstate Create_time(void (*entry)(void), uint16_t time) {
 }
 
 /**
- * @brief 创建事件触发任务
- * @brief Create an event-triggered task
- * @param entry 任务函数指针 / Task function pointer
- * @return 操作结果 / Operation result
- */
-static FCstate Create_event(void (*entry)(void)) {
-    int8_t idx;
-
-    if (entry == 0) return OPS_NO;
-    if (SearchIndex(entry, EVENT) >= 0) return OPS_NO;
-    if (dat.pri.event_num >= TASK_MAX) return OPS_NO;
-
-    TIMER_INTERRUPT_DISABLE();
-    idx = dat.pri.event_num;
-    dat.pri.event_list[idx].entry    = entry;
-    dat.pri.event_list[idx].taskflag = NOT_RUN;
-    dat.pri.event_list[idx].cache    = 0xFFFF;
-    dat.pri.event_num++;
-    TIMER_INTERRUPT_ENABLE();
-    return OPS_OK;
-}
-
-/**
  * @brief 删除任务
  * @brief Delete a task
  * @param entry 要删除的任务函数指针 / Task function pointer to delete
- * @return 操作结果 / Operation result
- * @note 采用末尾元素覆盖法，O(1) 复杂度。支持任务自删除（末尾覆盖保证安全）。
- * @note Uses the last-element overwrite method, O(1) complexity. Supports task self-deletion (tail overwrite ensures safety).
+ * @return OPS_OK / OPS_NO
  */
-static FCstate TaskDel(void (*entry)(void)) {
-    int8_t index;
+static FCstate TaskDel(void (*entry)(void))
+{
+    int8_t idx;
 
     if (entry == 0) return OPS_NO;
 
-    // 删除时间任务 / Delete time task
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
+    if ((idx = SearchIndex(entry)) >= 0) {
         TIMER_INTERRUPT_DISABLE();
         dat.pri.time_num--;
-        dat.pri.time_list[index] = dat.pri.time_list[dat.pri.time_num];
-        TIMER_INTERRUPT_ENABLE();
-        return OPS_OK;
-    }
-
-    // 删除事件任务 / Delete event task
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        TIMER_INTERRUPT_DISABLE();
-        dat.pri.event_num--;
-        dat.pri.event_list[index] = dat.pri.event_list[dat.pri.event_num];
+        dat.pri.time_list[idx] = dat.pri.time_list[dat.pri.time_num];
         TIMER_INTERRUPT_ENABLE();
         return OPS_OK;
     }
@@ -315,50 +282,40 @@ static FCstate TaskDel(void (*entry)(void)) {
 /**
  * @brief 修改时间任务的周期
  * @brief Change the period of a time-triggered task
- * @param entry   任务函数指针 / Task function pointer
- * @param newtime 新周期（tick 数，不能为 0） / New period (number of ticks, cannot be 0)
- * @return 操作结果 / Operation result
- * @note 新周期从下次执行开始生效，不影响当前已安排的 next_tick。
- * @note The new period takes effect from the next execution, does not affect the already scheduled next_tick.
+ * @param entry    任务函数指针 / Task function pointer
+ * @param newtime  新周期（tick数，必须 >0） / New period (number of ticks, must be >0)
+ * @return OPS_OK / OPS_NO
+ * @note  新周期从下次执行开始生效，不影响当前已安排的next_tick
+ * @note  The new period takes effect from the next execution, does not affect the already scheduled next_tick
  */
-static FCstate TaskCycle(void (*entry)(void), uint16_t newtime) {
-    int8_t index;
+static FCstate TaskCycle(void (*entry)(void), uint16_t newtime)
+{
+    int8_t idx;
 
-    if (newtime == 0) return OPS_NO;
-    if (entry == 0) return OPS_NO;
-
-    index = SearchIndex(entry, TIME);
-    if (index == -1) return OPS_NO;
-
-    dat.pri.time_list[index].taskcyc = newtime;
+    if (newtime == 0 || entry == 0) return OPS_NO;
+    idx = SearchIndex(entry);
+    if (idx == -1) return OPS_NO;
+    dat.pri.time_list[idx].taskcyc = newtime;
     return OPS_OK;
 }
 
 /**
- * @brief 挂起任务
- * @brief Suspend a task
+ * @brief 挂起任务（调度器将跳过该任务）
+ * @brief Suspend a task (scheduler will skip it)
  * @param entry 任务函数指针 / Task function pointer
- * @return 操作结果 / Operation result
+ * @return OPS_OK / OPS_NO
  */
-static FCstate TaskSuspend(void (*entry)(void)) {
-    int8_t index;
+static FCstate TaskSuspend(void (*entry)(void))
+{
+    int8_t idx;
 
     if (entry == 0) return OPS_NO;
-
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
+    if ((idx = SearchIndex(entry)) >= 0) {
         TIMER_INTERRUPT_DISABLE();
-        dat.pri.time_list[index].taskflag = SUSPEND;
+        dat.pri.time_list[idx].taskflag = SUSPEND;
         TIMER_INTERRUPT_ENABLE();
         return OPS_OK;
     }
-
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        TIMER_INTERRUPT_DISABLE();
-        dat.pri.event_list[index].taskflag = SUSPEND;
-        TIMER_INTERRUPT_ENABLE();
-        return OPS_OK;
-    }
-
     return OPS_NO;
 }
 
@@ -366,78 +323,69 @@ static FCstate TaskSuspend(void (*entry)(void)) {
  * @brief 恢复被挂起的任务
  * @brief Resume a suspended task
  * @param entry 任务函数指针 / Task function pointer
- * @return 操作结果 / Operation result
- * @note 对于时间任务，恢复后重新开始计时（当前 tick + 周期）。
- * @note For time tasks, restart counting from current tick + period.
+ * @return OPS_OK / OPS_NO
+ * @note  对于时间任务，恢复后重新开始计时（当前tick + 周期）
+ * @note  For time tasks, restart counting from current tick + period
  */
-static FCstate TaskRecover(void (*entry)(void)) {
-    int8_t index;
+static FCstate TaskRecover(void (*entry)(void))
+{
+    int8_t idx;
 
     if (entry == 0) return OPS_NO;
-
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
-        if (dat.pri.time_list[index].taskflag != SUSPEND) return OPS_NO;
+    if ((idx = SearchIndex(entry)) >= 0) {
+        if (dat.pri.time_list[idx].taskflag != SUSPEND) return OPS_NO;
         TIMER_INTERRUPT_DISABLE();
-        dat.pri.time_list[index].taskflag = NOT_RUN;
-        dat.pri.time_list[index].next_tick = dat.system_tick + dat.pri.time_list[index].taskcyc;
+        dat.pri.time_list[idx].taskflag = NOT_RUN;
+        dat.pri.time_list[idx].next_tick = dat.system_tick + dat.pri.time_list[idx].taskcyc;
         TIMER_INTERRUPT_ENABLE();
         return OPS_OK;
     }
-
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        if (dat.pri.event_list[index].taskflag != SUSPEND) return OPS_NO;
-        TIMER_INTERRUPT_DISABLE();
-        dat.pri.event_list[index].taskflag = NOT_RUN;
-        TIMER_INTERRUPT_ENABLE();
-        return OPS_OK;
-    }
-
+    
     return OPS_NO;
 }
 
 /**
- * @brief 发布事件（触发事件任务执行）
- * @brief Publish an event (trigger an event task)
+ * @brief 发布事件（触发指定任务函数执行）
+ * @brief Publish an event (trigger the execution of a task function)
  * @param entry 事件任务函数指针 / Event task function pointer
- * @return 操作结果（任务状态不为 NOT_RUN 时会失败） / Operation result (fails if task state is not NOT_RUN)
+ * @return OPS_OK / OPS_NO
  */
-static FCstate TaskRelease(void (*entry)(void)) {
-    int8_t index;
-
-    if (entry == 0) return OPS_NO;
-
-    index = SearchIndex(entry, EVENT);
-    if (index == -1) return OPS_NO;
-
-    if (dat.pri.event_list[index].taskflag != NOT_RUN) return OPS_NO;
-
+static FCstate TaskRelease(void (*entry)(void))
+{
+    // 1. 检查指针是否为空 / 1. Check if the pointer is null
+    if(entry == 0) return OPS_NO;
+    
     TIMER_INTERRUPT_DISABLE();
-    dat.pri.event_list[index].taskflag = READY;
+    
+    // 2. 检查事件列表满没满 / 2. Check if the event list is full
+    if(dat.pri.event_num >= TASK_MAX){
+        TIMER_INTERRUPT_ENABLE();
+        return OPS_NO;
+    }
+    
+    // 3. 将函数指针存入事件列表 / 3. Store the function pointer into the event list
+    dat.pri.event_list[dat.pri.event_num] = entry;
+    dat.pri.event_num ++;
+    
     TIMER_INTERRUPT_ENABLE();
-
+    
     return OPS_OK;
 }
 
 /**
- * @brief 向指定任务发送数据
- * @brief Send data to a specified task
+ * @brief 向指定任务发送数据（16位）
+ * @brief Send 16-bit data to a specified task
  * @param entry 接收任务函数指针 / Receiver task function pointer
- * @param d     要发送的数据（0xFFFF 为保留值，表示无数据） / Data to send (0xFFFF is reserved, indicates no data)
- * @return 操作结果 / Operation result
+ * @param d     要发送的数据（0xFFFF为保留值，不可发送） / Data to send (0xFFFF is reserved, cannot be sent)
+ * @return OPS_OK / OPS_NO
  */
-static FCstate Senddat(void (*entry)(void), uint16_t d) {
-    int8_t index;
+static FCstate Senddat(void (*entry)(void), uint16_t d)
+{
+    uint8_t idx;
 
-    if (entry == 0) return OPS_NO;
-    if (d == 0xFFFF) return OPS_NO;
-
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
-        dat.pri.time_list[index].cache = d;
-        return OPS_OK;
-    }
-
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        dat.pri.event_list[index].cache = d;
+    if (entry == 0 || d == 0xFFFF) return OPS_NO;
+    if ((idx = SearchIndex(entry)) >= 0) {
+        dat.pri.time_list[idx].cache = d;
         return OPS_OK;
     }
 
@@ -449,80 +397,62 @@ static FCstate Senddat(void (*entry)(void), uint16_t d) {
  * @brief Receive data for the current task
  * @param entry 本任务函数指针 / Current task function pointer
  * @param mode  读取模式（READ_ONLY 或 AUTO_CLEAR） / Read mode (READ_ONLY or AUTO_CLEAR)
- * @return 缓存中的数据，0xFFFF 表示无数据或错误 / Data in cache, 0xFFFF indicates no data or error
+ * @return 缓存中的数据，0xFFFF表示无数据或错误 / Data in cache, 0xFFFF indicates no data or error
  */
-static uint16_t Receive(void (*entry)(void), ReceiveMode mode) {
-    int8_t index;
+static uint16_t Receive(void (*entry)(void), ReceiveMode mode)
+{
+    int8_t idx;
     uint16_t d;
 
-    if (entry == 0) return 0xFFFF;
-    if (mode != AUTO_CLEAR && mode != READ_ONLY) return 0xFFFF;
-
-    // 尝试时间任务 / Try time task
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
-        d = dat.pri.time_list[index].cache;
-        if (mode == AUTO_CLEAR) {
-            dat.pri.time_list[index].cache = 0xFFFF;
-        }
+    if (entry == 0 || (mode != AUTO_CLEAR && mode != READ_ONLY)) return 0xFFFF;
+    if ((idx = SearchIndex(entry)) >= 0) {
+        d = dat.pri.time_list[idx].cache;
+        if (mode == AUTO_CLEAR) dat.pri.time_list[idx].cache = 0xFFFF;
         return d;
     }
-
-    // 尝试事件任务 / Try event task
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        d = dat.pri.event_list[index].cache;
-        if (mode == AUTO_CLEAR) {
-            dat.pri.event_list[index].cache = 0xFFFF;
-        }
-        return d;
-    }
-
+   
     return 0xFFFF;
 }
 
 /**
- * @brief 清空任务的数据缓存区
- * @brief Clear the task's data cache
+ * @brief 清空任务的数据缓存区（设为0xFFFF）
+ * @brief Clear the task's data cache (set to 0xFFFF)
  * @param entry 任务函数指针 / Task function pointer
- * @return 操作结果 / Operation result
+ * @return OPS_OK / OPS_NO
  */
-static FCstate Clear(void (*entry)(void)) {
-    int8_t index;
+static FCstate Clear(void (*entry)(void))
+{
+    uint8_t idx;
 
     if (entry == 0) return OPS_NO;
-
-    if ((index = SearchIndex(entry, TIME)) >= 0) {
-        dat.pri.time_list[index].cache = 0xFFFF;
+    if ((idx = SearchIndex(entry)) >= 0) {
+        dat.pri.time_list[idx].cache = 0xFFFF;
         return OPS_OK;
     }
-
-    if ((index = SearchIndex(entry, EVENT)) >= 0) {
-        dat.pri.event_list[index].cache = 0xFFFF;
-        return OPS_OK;
-    }
-
+    
     return OPS_NO;
 }
 
-// ==================== 初始化函数 ====================
-// ==================== Initialization Function ====================
+/* ==================== 初始化函数 ==================== */
+/* ==================== Initialization Function ==================== */
 
 /**
- * @brief 调度器初始化函数
- * @brief Scheduler initialization function
- * @details 必须在创建任何任务之前调用。
- *          Must be called before creating any tasks.
- *          将内部函数注册到全局 API 结构体 tes 中，并清空任务计数器和系统 tick。
- *          Registers internal functions into the global API structure 'tes' and clears task counters and system tick.
+ * @brief 调度器初始化，必须在创建任何任务前调用
+ * @brief Scheduler initialization, must be called before creating any tasks
+ * @details 注册所有内部函数到dat.Public，并将其赋值给全局tes
+ * @details Registers all internal functions to dat.Public, then assigns it to global tes
  */
-void TES_Init(void) {
+void TES_Init(void)
+{
+    /* 清零系统tick和任务计数器 / Clear system tick and task counters */
     dat.system_tick = 0;
     dat.pri.time_num = 0;
     dat.pri.event_num = 0;
 
+    /* 注册API函数到内部Public结构体 / Register API functions to internal Public structure */
     dat.Public.tick         = SysTick;
     dat.Public.scheduler    = Scheduler;
     dat.Public.create_time  = Create_time;
-    dat.Public.create_event = Create_event;
     dat.Public.del          = TaskDel;
     dat.Public.cycle        = TaskCycle;
     dat.Public.suspend      = TaskSuspend;
@@ -532,5 +462,6 @@ void TES_Init(void) {
     dat.Public.receive      = Receive;
     dat.Public.clear        = Clear;
 
+    /* 将内部API暴露给全局tes，用户通过tes调用 / Expose internal API to global tes, users call via tes */
     tes = dat.Public;
 }

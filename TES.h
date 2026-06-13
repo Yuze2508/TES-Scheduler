@@ -25,8 +25,8 @@
  * @{
  */
 
-/** 1. 目标 MCU 头文件（可根据实际平台删除或替换） */
-/** 1. Target MCU header file (can be removed or replaced according to the actual platform) */
+/** 目标 MCU 头文件（可根据实际平台删除或替换） */
+/** Target MCU header file (can be removed or replaced according to the actual platform) */
 #include <STC15F2K60S2.H>
 
 /**
@@ -63,8 +63,8 @@ typedef long            int32_t;   ///< 有符号32位整数 (-2147483648-214748
  * @{
  */
 
-/** 最大任务数量（时间任务 + 事件任务的总和不超过此值） */
-/** Maximum number of tasks (total of time tasks + event tasks should not exceed this value) */
+/** 时间任务列表和事件列表各自的最大容量（每个列表最多存放 TASK_MAX 个） */
+/** Maximum size of time task list and event list (each can hold up to TASK_MAX) */
 #define TASK_MAX (8)
 
 /** @} */
@@ -77,20 +77,10 @@ typedef long            int32_t;   ///< 有符号32位整数 (-2147483648-214748
  * @brief Task state
  */
 typedef enum {
-    NOT_RUN,    ///< 未运行（空闲） / Not running (idle)
-    RUN,        ///< 正在执行（临时状态） / Running (temporary state)
-    SUSPEND,    ///< 挂起（调度器跳过） / Suspended (scheduler skips)
-    READY       ///< 就绪（仅事件任务，表示有事件发生） / Ready (event task only, indicates an event has occurred)
+    NOT_RUN,    /* 空闲 / idle */
+    RUN,        /* 正在执行 / running */
+    SUSPEND,    /* 挂起 / suspended */
 } TaskState;
-
-/**
- * @brief 任务类型（用于内部查找）
- * @brief Task type (for internal lookup)
- */
-typedef enum {
-    EVENT,      ///< 事件触发任务 / Event-triggered task
-    TIME        ///< 时间触发任务 / Time-triggered task
-} TaskType;
 
 /**
  * @brief 操作返回值
@@ -117,7 +107,7 @@ typedef enum {
  * @brief 用户 API 接口结构体
  * @brief User API interface structure
  * @details 所有调度器功能通过此结构体的函数指针调用。
- * @details All scheduler functions are called through function pointers in this structure.
+ *          All scheduler functions are called through function pointers in this structure.
  */
 typedef struct {
     /**
@@ -138,33 +128,31 @@ typedef struct {
      * @brief 创建时间触发任务
      * @brief Create a time-triggered task
      * @param entry     任务函数指针 / Task function pointer
-     * @param taskcycle 执行周期（单位：tick） / Execution period (unit: tick)
+     * @param taskcycle 执行周期（单位：tick），必须 >0 / Execution period (unit: tick), must be >0
      * @return 操作结果 / Operation result
+     * @note 任务创建后，第一次执行将延迟一个周期。
+     * @note The first execution will be delayed by one period.
      */
     FCstate (*create_time)(void (*entry)(void), uint16_t taskcycle);
-
-    /**
-     * @brief 创建事件触发任务
-     * @brief Create an event-triggered task
-     * @param entry 任务函数指针 / Task function pointer
-     * @return 操作结果 / Operation result
-     */
-    FCstate (*create_event)(void (*entry)(void));
 
     /**
      * @brief 删除任务
      * @brief Delete a task
      * @param entry 要删除的任务函数指针 / Task function pointer to delete
      * @return 操作结果 / Operation result
+     * @note 采用末尾覆盖法，O(1) 复杂度，删除后任务控制块被覆盖。
+     * @note Uses the last-element overwrite method, O(1) complexity. The task control block is overwritten.
      */
     FCstate (*del)(void (*entry)(void));
 
     /**
      * @brief 修改时间任务的周期
      * @brief Change the period of a time-triggered task
-     * @param entry    任务函数指针 / Task function pointer
-     * @param newcycle 新周期（单位：tick） / New period (unit: tick)
+     * @param entry    时间任务函数指针 / Time task function pointer
+     * @param newcycle 新周期（tick），必须 >0 / New period (unit: tick), must be >0
      * @return 操作结果 / Operation result
+     * @note 新周期从下次执行开始生效，不影响本次已安排的执行时刻。
+     * @note The new period takes effect from the next execution, does not affect the already scheduled next_tick.
      */
     FCstate (*cycle)(void (*entry)(void), uint16_t newcycle);
 
@@ -173,6 +161,8 @@ typedef struct {
      * @brief Suspend a task (scheduler will skip it)
      * @param entry 任务函数指针 / Task function pointer
      * @return 操作结果 / Operation result
+     * @note 挂起的时间任务会停止倒计时。
+     * @note Suspended time tasks stop counting down.
      */
     FCstate (*suspend)(void (*entry)(void));
 
@@ -181,14 +171,18 @@ typedef struct {
      * @brief Resume a suspended task
      * @param entry 任务函数指针 / Task function pointer
      * @return 操作结果 / Operation result
+     * @note 恢复时间任务时，重新从“当前时间 + 周期”开始计时。
+     * @note When resuming a time task, it restarts counting from current tick + period.
      */
     FCstate (*recovery)(void (*entry)(void));
 
     /**
-     * @brief 发布事件（触发事件任务）
-     * @brief Publish an event (trigger an event task)
+     * @brief 发布事件（触发指定任务函数执行）
+     * @brief Publish an event (trigger the execution of a task function)
      * @param entry 事件任务函数指针 / Event task function pointer
-     * @return 操作结果（任务状态不为 NOT_RUN 时会失败） / Operation result (fails if task state is not NOT_RUN)
+     * @return 操作结果 / Operation result
+     * @note 发布事件并不会立即执行任务，而是将任务函数指针放入事件列表，由调度器执行。
+     * @note Publishing an event does not execute the task immediately; the function pointer is placed into the event list and will be executed by the scheduler.
      */
     FCstate (*release)(void (*entry)(void));
 
@@ -196,17 +190,21 @@ typedef struct {
      * @brief 向指定任务发送数据（16位）
      * @brief Send 16-bit data to a specified task
      * @param entry 接收数据的任务函数指针 / Task function pointer of the receiver
-     * @param d     要发送的数据（0xFFFF 为保留值，不可发送） / Data to send (0xFFFF is reserved, cannot be sent)
+     * @param d     要发送的数据（0xFFFF 为保留值，表示“空”，不允许发送） / Data to send (0xFFFF is reserved, cannot be sent)
      * @return 操作结果 / Operation result
+     * @note 数据存入目标任务的 cache 字段，接收方通过 tes.receive() 读取。
+     * @note Data is stored in the target task's cache field; the receiver reads it via tes.receive().
      */
     FCstate (*send)(void (*entry)(void), uint16_t d);
 
     /**
      * @brief 接收本任务的数据
      * @brief Receive data for the current task
-     * @param entry 本任务函数指针 / Current task function pointer
+     * @param entry 本任务的函数指针 / Current task function pointer
      * @param mode  读取模式（READ_ONLY 或 AUTO_CLEAR） / Read mode (READ_ONLY or AUTO_CLEAR)
      * @return 缓存中的数据，若为 0xFFFF 表示无数据或错误 / Data in cache, 0xFFFF indicates no data or error
+     * @note 通常在一个任务的开头调用，获取其他任务发送过来的数据。
+     * @note Usually called at the beginning of a task to get data sent by other tasks.
      */
     uint16_t (*receive)(void (*entry)(void), ReceiveMode mode);
 
@@ -215,28 +213,15 @@ typedef struct {
      * @brief Clear the task's data cache (set to 0xFFFF)
      * @param entry 任务函数指针 / Task function pointer
      * @return 操作结果 / Operation result
+     * @note 可用于主动丢弃未处理的数据。
+     * @note Can be used to actively discard unprocessed data.
      */
     FCstate (*clear)(void (*entry)(void));
 
 } SchedulerAPI;
 
-// ==================== 全局变量和函数声明 ====================
-// ==================== Global Variables and Function Declarations ====================
-
-/**
- * @brief 调度器初始化函数
- * @brief Scheduler initialization function
- * @details 必须在创建任何任务之前调用，用于注册内部 API。
- * @details Must be called before creating any tasks, used to register internal APIs.
- */
+/* 全局实例声明 / Global instance declarations */
 extern void TES_Init(void);
-
-/**
- * @brief 全局 API 结构体实例
- * @brief Global API structure instance
- * @details 用户通过此结构体调用所有调度器功能。
- * @details Users call all scheduler functions through this structure.
- */
 extern SchedulerAPI tes;
 
 #endif /* __TES_H__ */
