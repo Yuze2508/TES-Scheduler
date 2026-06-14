@@ -5,9 +5,10 @@
  * 
  * @details 轻量级协作式任务调度器，支持时间触发和事件触发任务，提供任务间通信功能。
  *          本版本采用环形绝对 tick 时间轴与交替调度策略，无需每个 tick 遍历任务列表，效率更高。
- *          Lightweight cooperative task scheduler supporting time-triggered and event-triggered tasks,
- *          with inter-task communication. This version uses a circular absolute tick timeline and
- *          alternating scheduling policy, without traversing task list on every tick.
+ *          Lightweight cooperative task scheduler, supporting time-triggered and event-triggered tasks, 
+ *          with inter-task communication. This version adopts a circular absolute tick timeline
+ *          and alternating scheduling policy for higher efficiency.
+ *
  * 
  * @note 移植到新 MCU 仅需修改本文件中的硬件相关部分。
  *       Porting to a new MCU only requires modifying the hardware-related sections in this file.
@@ -60,14 +61,19 @@ typedef long            int32_t;   ///< 有符号32位整数 (-2147483648-214748
 /**
  * @name 配置选项
  * @name Configuration Options
- * @{
  */
 
 /** 时间任务列表和事件列表各自的最大容量（每个列表最多存放 TASK_MAX 个） */
 /** Maximum size of time task list and event list (each can hold up to TASK_MAX) */
 #define TASK_MAX (8)
 
-/** @} */
+/**
+ * @brief 事件环形队列容量（必须是2的幂，例如4、8、16、32等）
+ * @brief Event circular queue size (must be a power of 2, e.g. 4,8,16,32)
+ */
+#define EVENT_QUEUE_LEN  (8)
+
+#define EVENT_QUEUE_MASK (EVENT_QUEUE_LEN - 1)
 
 // ==================== 枚举类型定义 ====================
 // ==================== Enumeration Type Definitions ====================

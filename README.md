@@ -15,19 +15,19 @@
 - ✅ 任务间通信：16位数据缓存（仅时间任务），支持 `send` / `receive`（自动/只读模式）
 - ✅ 低资源占用：全静态内存，无动态分配
 - ✅ 可移植性：只需提供基础类型和中断开关宏
-
+- ✅ 可配置独立事件队列容量 `EVENT_QUEUE_LEN`（须为2的幂）
 ---
 
 ## 🏗️ 架构概述
 
 TES 分别管理**时间任务**和**事件**：
 
-- **时间任务**：静态数组 `time_list` 存储任务控制块（TCB），包含入口函数、周期、下次绝对 tick、状态和缓存。
-- **事件**：使用一个固定大小的函数指针数组 `event_list`，支持事件计数（可连续发布多个事件）。
+- **时间任务**：静态数组 `time_list` 存储任务控制块，包含入口函数、周期、下次绝对 tick、状态和缓存。
+- **事件**：使用一个固定大小的FIFO环形队列 `eventFIFO`（容量 `EVENT_QUEUE_LEN`，必须是2的幂）。
 
 调度核心 `sch_alt()` 在两个阶段之间交替：
 
-1. **事件阶段**：如果事件列表非空，取出第一个函数指针并执行（采用尾部覆盖更新函数指针数组），然后切换到时间阶段。
+1. **事件阶段**：如果事件列表非空，则取出一个函数指针并执行，然后切换到时间阶段。
 2. **时间阶段**：按轮询顺序寻找第一个已到期（`now >= next_tick`）且未挂起的时间任务，执行后重新计算 `next_tick = now + taskcyc`，然后切换回事件阶段。
 
 系统 tick 由硬件定时器中断驱动，仅递增全局 `system_tick`。调度器在主循环中反复调用 `tes.scheduler()`。
@@ -167,6 +167,7 @@ MIT 许可证。可自由用于商业和开源项目。
 - ✅ Inter‑task communication: 16‑bit data cache (time tasks only) with `send` / `receive` (auto‑clear / read‑only)
 - ✅ Low memory usage: Completely statically allocated.
 - ✅ Portable: only requires basic types and interrupt control macros
+- ✅ Configurable independent event queue size `EVENT_QUEUE_LEN` (must be a power of 2)
 
 ---
 
@@ -175,11 +176,11 @@ MIT 许可证。可自由用于商业和开源项目。
 TES manages **time tasks** and **events** separately:
 
 - **Time tasks**: static array `time_list` stores TCBs (entry, period, absolute next tick, state, cache).
-- **Events**: fixed‑size function pointer array `event_list` supports event counting (multiple publishes are queued, no loss).
+- **Events**: a fixed‑size FIFO circular queue `eventFIFO` (size `EVENT_QUEUE_LEN`, must be a power of 2). .
 
 The core scheduler `sch_alt()` alternates between two phases:
 
-1. **Event phase**: if the event list is not empty, take the first function pointer, execute it (tail‑overwrite, FIFO order), then switch to time phase.
+1. **Event phase**: If the event list is not empty, take out a function pointer, execute it, and then switch to the time phase.
 2. **Time phase**: round‑robin scan for the first non‑suspended time task whose `next_tick` has been reached (`now >= next_tick`), execute it, recalculate `next_tick = now + taskcyc`, then switch back to event phase.
 
 The system tick is driven by a hardware timer interrupt, which simply increments the global `system_tick`. The scheduler must be called repeatedly from the main loop (`tes.scheduler()`).

@@ -12,7 +12,7 @@
  *          - SysTick 仅递增全局计数器，不再遍历任务列表
  *          - 调度器在任务执行后读取当前 tick 并计算下次执行时刻，消除累积误差
  *          - 仅保留交替调度策略（每次调度执行一个事件任务 + 一个时间任务）
- *          - 重构事件响应机制，使用函数指针列表 + 尾部覆盖，支持事件计数
+ *          - 重构事件响应机制，使用FIFO环形列表
  *          
  *          Implements a lightweight cooperative task scheduler, including management of time-triggered
  *          and event-triggered tasks, alternating scheduling policy, circular absolute timeline,
@@ -24,7 +24,7 @@
  *          - SysTick only increments global counter, no task list traversal
  *          - Scheduler reads current tick after task execution and calculates next time, eliminating drift
  *          - Only alternating scheduling policy (one event task + one time task per schedule)
- *          - Refactored event response mechanism using function pointer list with tail overwrite, supports event counting
+ *          - Refactor the event response mechanism to use a FIFO circular queue.
  * 
  * @see TES.h
  */
@@ -56,14 +56,18 @@ static struct {
             uint16_t taskcyc;       /* 任务周期（单位：tick） / Task period (unit: tick) */
             uint16_t next_tick;     /* 下次执行的绝对tick时刻（环形时间轴） / Absolute tick of next execution (circular timeline) */
             TaskState taskflag;     /* 任务状态 / Task state */
-            uint16_t cache;         /* 数据缓存区（任务间通信） / Data cache (inter-task communication) */
+			volatile uint16_t cache;    /* 数据缓存区（任务间通信） / Data cache (inter-task communication) */
         } time_list[TASK_MAX];
 
-        /* 事件任务待执行列表 / Pending event task list */
-        void (*event_list[TASK_MAX])(void);
+        /* 事件任务待执行列表（环形FIFO） / Pending event task list (circular FIFO) */
+		struct {
+			void (*event_queue[EVENT_QUEUE_LEN])(void);
+			volatile uint8_t event_head;      // 读指针（下次出队的位置） / Read index (next dequeue position)
+			volatile uint8_t event_tail;      // 写指针（下次入队的位置） / Write index (next enqueue position)
+			volatile uint8_t event_cnt;       // 当前队列中的事件数量 / Current number of events in queue
+		} eventFIFO;
 
-        uint8_t time_num;           /* 当前时间任务数量 / Number of currently created time tasks */
-        uint8_t event_num;          /* 当前已装载事件数量 / Number of pending events */
+		uint8_t time_num;           /* 当前时间任务数量 / Number of currently created time tasks */
 
     } pri;
 
@@ -105,6 +109,55 @@ static int8_t SearchIndex(void (*entry)(void))
     return -1;
 }
 
+/* ==================== 事件队列操作函数 ==================== */
+/* ==================== Event Queue Operation Functions ==================== */
+
+/**
+ * @brief 检查事件队列是否为空
+ * @brief Check if event queue is empty
+ * @return 1:空 / empty, 0:非空 / not empty
+ */
+static uint8_t is_event_queue_empty(void) {
+    return (dat.pri.eventFIFO.event_cnt == 0);
+}
+
+/**
+ * @brief 检查事件队列是否已满
+ * @brief Check if event queue is full
+ * @return 1:满 / full, 0:未满 / not full
+ */
+static uint8_t is_event_queue_full(void) {
+    return (dat.pri.eventFIFO.event_cnt == EVENT_QUEUE_LEN);
+}
+
+/**
+ * @brief 事件入队（发布事件）
+ * @brief Enqueue an event (publish an event)
+ * @param func 事件任务函数指针 / Event task function pointer
+ * @return 1:成功 / success, 0:失败（队列满）/ failure (queue full)
+ */
+static uint8_t event_enqueue(void (*func)(void)) {
+    if (is_event_queue_full()) return 0;
+    dat.pri.eventFIFO.event_queue[dat.pri.eventFIFO.event_tail] = func;
+    dat.pri.eventFIFO.event_tail = (dat.pri.eventFIFO.event_tail + 1) & EVENT_QUEUE_MASK;
+    dat.pri.eventFIFO.event_cnt++;
+    return 1;
+}
+
+/**
+ * @brief 事件出队（获取一个待处理事件）
+ * @brief Dequeue an event (get a pending event)
+ * @return 事件任务函数指针，队列空则返回0 / Event task function pointer, or 0 if queue empty
+ */
+static void (*event_dequeue(void))(void) {
+    void (*func)(void);
+    if (is_event_queue_empty()) return 0;
+    func = dat.pri.eventFIFO.event_queue[dat.pri.eventFIFO.event_head];
+    dat.pri.eventFIFO.event_head = (dat.pri.eventFIFO.event_head + 1) & EVENT_QUEUE_MASK;
+    dat.pri.eventFIFO.event_cnt--;
+    return func;
+}
+
 /**
  * @brief 滴答定时器中断服务函数（需挂载到硬件定时器中断）
  * @brief Tick timer interrupt service function (to be attached to hardware timer interrupt)
@@ -136,40 +189,17 @@ static void sch_alt(void)
 
     /* ----- 阶段0：处理一个事件 / Phase 0: handle one event ----- */
     if (alt_phase == 0) {
-        
-        // 1. 先检查是否有事件需要处理，没有则直接更新相位
-        // 1. Check if there are pending events; if not, just update phase
-        TIMER_INTERRUPT_DISABLE();
-        if(dat.pri.event_num == 0){
-            TIMER_INTERRUPT_ENABLE();
-            alt_phase = 1;
-            
-        }else{
-        
-            // 2. 有事件处理，取出待处理事件函数指针数组的第一个元素
-            // 2. There is an event to process: take the first element of the pending event function pointer array
-            void (*func)(void) = dat.pri.event_list[0];
-            
-            // 3. 计数更新
-            // 3. Decrement event count
-            dat.pri.event_num--;
-            
-            // 4. 检查计数是否为0，为0则直接清零，不为0则尾部覆盖更新函数指针数组
-            // 4. If count is zero, clear the first element; otherwise, overwrite the first element with the last element (tail overwrite)
-            if(dat.pri.event_num == 0){dat.pri.event_list[0] = 0;}
-            else{dat.pri.event_list[0] = dat.pri.event_list[dat.pri.event_num];}
-            
-            TIMER_INTERRUPT_ENABLE();
-            
-            // 5. 执行任务函数
-            // 5. Execute the task function
-            func();
-            
-            // 6. 更新相位
-            // 6. Update phase
-            alt_phase = 1;
-        }
-    }
+		
+		void (*func)(void);
+
+		TIMER_INTERRUPT_DISABLE();
+		func = event_dequeue();
+		TIMER_INTERRUPT_ENABLE();
+
+		if (func != 0) {func();}
+		
+		alt_phase = 1;
+	}
 
     /* ----- 阶段1：执行一个到点的时间任务 / Phase 1: execute one due time task ----- */
     if (alt_phase == 1) {
@@ -352,24 +382,15 @@ static FCstate TaskRecover(void (*entry)(void))
  */
 static FCstate TaskRelease(void (*entry)(void))
 {
-    // 1. 检查指针是否为空 / 1. Check if the pointer is null
-    if(entry == 0) return OPS_NO;
-    
+	uint8_t ret;
+	
+    if (entry == 0) return OPS_NO;
+
     TIMER_INTERRUPT_DISABLE();
-    
-    // 2. 检查事件列表满没满 / 2. Check if the event list is full
-    if(dat.pri.event_num >= TASK_MAX){
-        TIMER_INTERRUPT_ENABLE();
-        return OPS_NO;
-    }
-    
-    // 3. 将函数指针存入事件列表 / 3. Store the function pointer into the event list
-    dat.pri.event_list[dat.pri.event_num] = entry;
-    dat.pri.event_num ++;
-    
+    ret = event_enqueue(entry);
     TIMER_INTERRUPT_ENABLE();
-    
-    return OPS_OK;
+
+    return ret ? OPS_OK : OPS_NO;
 }
 
 /**
@@ -446,8 +467,10 @@ void TES_Init(void)
 {
     /* 清零系统tick和任务计数器 / Clear system tick and task counters */
     dat.system_tick = 0;
-    dat.pri.time_num = 0;
-    dat.pri.event_num = 0;
+	dat.pri.time_num = 0;
+	dat.pri.eventFIFO.event_head = 0;
+	dat.pri.eventFIFO.event_tail = 0;
+	dat.pri.eventFIFO.event_cnt = 0;
 
     /* 注册API函数到内部Public结构体 / Register API functions to internal Public structure */
     dat.Public.tick         = SysTick;
