@@ -228,6 +228,6 @@ typedef struct {
 
 /* 全局实例声明 / Global instance declarations */
 extern void TES_Init(void);
-extern SchedulerAPI tes;
+extern const SchedulerAPI tes;
 
 #endif /* __TES_H__ */

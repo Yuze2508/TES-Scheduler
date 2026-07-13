@@ -13,6 +13,8 @@
  *          - 调度器在任务执行后读取当前 tick 并计算下次执行时刻，消除累积误差
  *          - 仅保留交替调度策略（每次调度执行一个事件任务 + 一个时间任务）
  *          - 重构事件响应机制，使用FIFO环形列表
+ *          - 优化内存占用：将 API 结构体 tes 移至 ROM（Flash）
+ *            所有外部调用接口 tes.xxx() 完全保持不变，用户代码无需任何修改
  *          
  *          Implements a lightweight cooperative task scheduler, including management of time-triggered
  *          and event-triggered tasks, alternating scheduling policy, circular absolute timeline,
@@ -25,16 +27,13 @@
  *          - Scheduler reads current tick after task execution and calculates next time, eliminating drift
  *          - Only alternating scheduling policy (one event task + one time task per schedule)
  *          - Refactor the event response mechanism to use a FIFO circular queue.
+ *          - Memory optimization: moved API structure 'tes' to ROM (Flash).
+ *            All external call interfaces tes.xxx() remain unchanged, no user code modification required.
  * 
  * @see TES.h
  */
 
 #include "TES.h"
-
-/* ==================== 全局API实例 ==================== */
-/* ==================== Global API Instance ==================== */
-
-SchedulerAPI tes;   /* 用户通过此结构体调用所有功能 / User calls all functions through this structure */
 
 /* ==================== 私有数据 ==================== */
 /* ==================== Private Data ==================== */
@@ -46,7 +45,7 @@ SchedulerAPI tes;   /* 用户通过此结构体调用所有功能 / User calls a
  * @details Contains public API pointers and private task control blocks.
  */
 static struct {
-    SchedulerAPI Public;        /* 内部API集合，初始化后赋值给全局tes / Internal API set, assigned to global tes after init */
+
     volatile uint16_t system_tick;       /* 全局系统tick，每次调用tes.tick()递增 / Global system tick, incremented on each tes.tick() */
 
     struct {
@@ -454,14 +453,37 @@ static FCstate Clear(void (*entry)(void))
     return OPS_NO;
 }
 
+// ==================== 全局 API 实例（常量，放入 ROM） ====================
+// ==================== Global API Instance (constant, placed in ROM) ====================
+/**
+ * @brief 调度器 API 结构体，所有函数指针在此集中定义。
+ * @note  使用 const 修饰，编译器将其分配至只读存储区（Flash/ROM），不占用 RAM。
+ * @note  顺序初始化必须与 SchedulerAPI 结构体成员顺序严格一致。
+ */
+const SchedulerAPI tes = {
+    SysTick,        // tick
+    Scheduler,      // scheduler
+    Create_time,    // create_time
+    TaskDel,        // del
+    TaskCycle,      // cycle
+    TaskSuspend,    // suspend
+    TaskRecover,    // recovery
+    TaskRelease,    // release
+    Senddat,        // send
+    Receive,        // receive
+    Clear           // clear
+};
+
 /* ==================== 初始化函数 ==================== */
 /* ==================== Initialization Function ==================== */
 
 /**
  * @brief 调度器初始化，必须在创建任何任务前调用
  * @brief Scheduler initialization, must be called before creating any tasks
- * @details 注册所有内部函数到dat.Public，并将其赋值给全局tes
- * @details Registers all internal functions to dat.Public, then assigns it to global tes
+ * @details 清零所有内部数据（系统tick、任务计数、事件队列状态）。
+ *          API 结构体 tes 已在 ROM 中静态初始化，无需在此注册。
+ * @details Clears all internal data (system tick, task count, event queue state).
+ *          The API structure 'tes' is statically initialized in ROM, no registration needed here.
  */
 void TES_Init(void)
 {
@@ -471,20 +493,4 @@ void TES_Init(void)
 	dat.pri.eventFIFO.event_head = 0;
 	dat.pri.eventFIFO.event_tail = 0;
 	dat.pri.eventFIFO.event_cnt = 0;
-
-    /* 注册API函数到内部Public结构体 / Register API functions to internal Public structure */
-    dat.Public.tick         = SysTick;
-    dat.Public.scheduler    = Scheduler;
-    dat.Public.create_time  = Create_time;
-    dat.Public.del          = TaskDel;
-    dat.Public.cycle        = TaskCycle;
-    dat.Public.suspend      = TaskSuspend;
-    dat.Public.recovery     = TaskRecover;
-    dat.Public.release      = TaskRelease;
-    dat.Public.send         = Senddat;
-    dat.Public.receive      = Receive;
-    dat.Public.clear        = Clear;
-
-    /* 将内部API暴露给全局tes，用户通过tes调用 / Expose internal API to global tes, users call via tes */
-    tes = dat.Public;
 }
