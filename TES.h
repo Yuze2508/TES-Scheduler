@@ -63,7 +63,7 @@ typedef long            int32_t;   ///< 有符号32位整数 (-2147483648-214748
  * @name Configuration Options
  */
 
-/** 时间任务列表和事件列表各自的最大容量（每个列表最多存放 TASK_MAX 个） */
+/** 时间任务列表的最大容量 */
 /** Maximum size of time task list and event list (each can hold up to TASK_MAX) */
 #define TASK_MAX (8)
 
